@@ -103,6 +103,16 @@ extension StatusItemController {
             self.loginLogger.info("Starting login task", metadata: ["provider": provider.rawValue])
             print("[CodexBar] Starting login task for \(provider.rawValue)")
 
+            if provider == .codex {
+                guard CodexAccountStore.createAccountAndActivate() != nil else {
+                    self.loginPhase = .idle
+                    self.presentLoginAlert(
+                        title: "Could not add Codex account",
+                        message: "Failed to create a new Codex account directory.")
+                    return
+                }
+            }
+
             let shouldRefresh = await self.runLoginFlow(provider: provider)
             if shouldRefresh {
                 await self.store.refresh()
