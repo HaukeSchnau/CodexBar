@@ -665,11 +665,14 @@ extension UsageMenuCardView.Model {
         account: AccountInfo,
         metadata: ProviderMetadata) -> String
     {
+        let fallbackEmail = metadata.usesAccountFallback
+            ? account.email?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+
+        if provider == .codex, let fallbackEmail, !fallbackEmail.isEmpty { return fallbackEmail }
         if let email = snapshot?.accountEmail(for: provider), !email.isEmpty { return email }
-        if metadata.usesAccountFallback,
-           let email = account.email, !email.isEmpty
-        {
-            return email
+        if let fallbackEmail, !fallbackEmail.isEmpty {
+            return fallbackEmail
         }
         return ""
     }
@@ -680,13 +683,18 @@ extension UsageMenuCardView.Model {
         account: AccountInfo,
         metadata: ProviderMetadata) -> String?
     {
+        let fallbackPlan = metadata.usesAccountFallback
+            ? account.plan?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+
+        if provider == .codex, let fallbackPlan, !fallbackPlan.isEmpty {
+            return Self.planDisplay(fallbackPlan)
+        }
         if let plan = snapshot?.loginMethod(for: provider), !plan.isEmpty {
             return self.planDisplay(plan)
         }
-        if metadata.usesAccountFallback,
-           let plan = account.plan, !plan.isEmpty
-        {
-            return Self.planDisplay(plan)
+        if let fallbackPlan, !fallbackPlan.isEmpty {
+            return Self.planDisplay(fallbackPlan)
         }
         return nil
     }
