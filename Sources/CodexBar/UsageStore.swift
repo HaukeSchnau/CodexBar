@@ -321,6 +321,10 @@ final class UsageStore {
         CodexAccountStore.selectedAccountInfo() ?? self.codexFetcher.loadAccountInfo()
     }
 
+    func codexSnapshot(for accountID: String) -> UsageSnapshot? {
+        self.codexAccountSnapshots[accountID]
+    }
+
     var preferredSnapshot: UsageSnapshot? {
         for provider in self.enabledProviders() {
             if let snap = self.snapshots[provider] { return snap }
@@ -365,10 +369,6 @@ final class UsageStore {
 
     private var codexBrowserCookieOrder: BrowserCookieImportOrder {
         self.metadata(for: .codex).browserCookieOrder ?? Browser.defaultImportOrder
-    }
-
-    func snapshot(for provider: UsageProvider) -> UsageSnapshot? {
-        self.snapshots[provider]
     }
 
     func sourceLabel(for provider: UsageProvider) -> String {
