@@ -424,6 +424,7 @@ final class UsageStore {
             if ZaiSettingsReader.apiToken(environment: ProcessInfo.processInfo.environment) != nil {
                 return true
             }
+            self.settings.ensureZaiAPITokenLoaded()
             return !self.settings.zaiAPIToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         return true
