@@ -21,6 +21,7 @@ struct CodexBarApp: App {
             destination: .oslog(subsystem: "com.steipete.codexbar"),
             level: level,
             json: false))
+        Self.ensureCodexHome()
 
         KeychainAccessGate.isDisabled = UserDefaults.standard.bool(forKey: "debugDisableKeychainAccess")
         KeychainPromptCoordinator.install()
@@ -29,7 +30,7 @@ struct CodexBarApp: App {
         let settings = SettingsStore()
         let fetcher = UsageFetcher()
         let browserDetection = BrowserDetection(cacheTTL: BrowserDetection.defaultCacheTTL)
-        let account = fetcher.loadAccountInfo()
+        let account = CodexAccountStore.selectedAccountInfo() ?? fetcher.loadAccountInfo()
         let store = UsageStore(fetcher: fetcher, browserDetection: browserDetection, settings: settings)
         self.preferencesSelection = preferencesSelection
         _settings = State(wrappedValue: settings)
@@ -40,6 +41,10 @@ struct CodexBarApp: App {
             settings: settings,
             account: account,
             selection: preferencesSelection)
+    }
+
+    private static func ensureCodexHome() {
+        CodexAccountStore.bootstrapIfNeeded()
     }
 
     @SceneBuilder
@@ -278,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fallbackSettings = SettingsStore()
         let fetcher = UsageFetcher()
         let browserDetection = BrowserDetection(cacheTTL: BrowserDetection.defaultCacheTTL)
-        let fallbackAccount = fetcher.loadAccountInfo()
+        let fallbackAccount = CodexAccountStore.selectedAccountInfo() ?? fetcher.loadAccountInfo()
         let fallbackStore = UsageStore(fetcher: fetcher, browserDetection: browserDetection, settings: fallbackSettings)
         self.statusController = StatusItemController.factory(
             fallbackStore,
