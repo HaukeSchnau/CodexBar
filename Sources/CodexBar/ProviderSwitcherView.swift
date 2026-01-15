@@ -701,11 +701,8 @@ final class ProviderSwitcherView: NSView {
 
     private func updateWeeklyIndicatorVisibility(for view: NSView) {
         guard let indicator = self.weeklyIndicators[ObjectIdentifier(view)] else { return }
-        let isSelected = (view as? NSButton)?.state == .on
-
-        // Hide indicator on selected segment; also hide when we have no data.
-        indicator.track.isHidden = isSelected
-        indicator.fill.isHidden = isSelected
+        indicator.track.isHidden = false
+        indicator.fill.isHidden = false
     }
 
     private static func weeklyIndicatorColor(for provider: UsageProvider) -> NSColor {

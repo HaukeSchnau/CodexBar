@@ -565,7 +565,7 @@ extension StatusItemController {
         }
 
         // Fallback to the dynamic icon renderer if resources are missing (e.g. dev bundle mismatch).
-        let snapshot = self.store.snapshot(for: provider)
+        let snapshot = self.store.snapshot(for: provider, codexAccountID: entry.codexAccountID)
         let showUsed = self.settings.usageBarsShowUsed
         let primary = showUsed ? snapshot?.primary?.usedPercent : snapshot?.primary?.remainingPercent
         let weekly = showUsed ? snapshot?.secondary?.usedPercent : snapshot?.secondary?.remainingPercent
@@ -588,14 +588,8 @@ extension StatusItemController {
     }
 
     private func switcherWeeklyRemaining(for entry: ProviderSwitcherEntry) -> Double? {
-        if entry.provider == .codex,
-           let accountID = entry.codexAccountID,
-           accountID != CodexAccountStore.selectedAccountID()
-        {
-            return nil
-        }
         let provider = entry.provider
-        let snapshot = self.store.snapshot(for: provider)
+        let snapshot = self.store.snapshot(for: provider, codexAccountID: entry.codexAccountID)
         let window = self.menuBarMetricWindow(for: provider, snapshot: snapshot)
         guard let window else { return nil }
         if self.settings.usageBarsShowUsed {
