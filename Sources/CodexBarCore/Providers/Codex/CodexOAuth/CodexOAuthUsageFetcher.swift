@@ -189,7 +189,7 @@ public enum CodexOAuthUsageFetcher {
     }
 
     private static func resolveUsageURL() -> URL {
-        self.resolveUsageURL(env: ProcessInfo.processInfo.environment, configContents: nil)
+        self.resolveUsageURL(env: UsageFetcher.liveEnvironment(), configContents: nil)
     }
 
     private static func resolveUsageURL(env: [String: String], configContents: String?) -> URL {

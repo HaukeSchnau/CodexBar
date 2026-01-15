@@ -46,13 +46,18 @@ public enum CodexOAuthCredentialsError: LocalizedError, Sendable {
 }
 
 public enum CodexOAuthCredentialsStore {
+    private static func envValue(_ key: String) -> String? {
+        guard let value = getenv(key) else { return nil }
+        return String(cString: value)
+    }
+
     private static var authFilePath: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]?.trimmingCharacters(
-            in: .whitespacesAndNewlines),
-            !codexHome.isEmpty
+        if let codexHome = self.envValue("CODEX_HOME")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !codexHome.isEmpty
         {
-            return URL(fileURLWithPath: codexHome).appendingPathComponent("auth.json")
+            return URL(fileURLWithPath: codexHome)
+                .appendingPathComponent("auth.json")
         }
         return home.appendingPathComponent(".codex").appendingPathComponent("auth.json")
     }
