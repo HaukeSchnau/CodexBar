@@ -210,6 +210,8 @@ final class UsageStore {
     @ObservationIgnored var tokenFailureGates: [UsageProvider: ConsecutiveFailureGate] = [:]
     @ObservationIgnored var providerSpecs: [UsageProvider: ProviderSpec] = [:]
     @ObservationIgnored private let providerMetadata: [UsageProvider: ProviderMetadata]
+    @ObservationIgnored private var codexAccountSnapshots: [String: UsageSnapshot] = [:]
+    @ObservationIgnored private var activeCodexAccountID: String?
     @ObservationIgnored private var timerTask: Task<Void, Never>?
     @ObservationIgnored private var tokenTimerTask: Task<Void, Never>?
     @ObservationIgnored private var tokenRefreshSequenceTask: Task<Void, Never>?
@@ -314,6 +316,10 @@ final class UsageStore {
         case .amp: nil
         case .synthetic: nil
         }
+    }
+
+    func codexAccountFallbackInfo() -> AccountInfo {
+        CodexAccountStore.selectedAccountInfo() ?? self.codexFetcher.loadAccountInfo()
     }
 
     var preferredSnapshot: UsageSnapshot? {
@@ -561,7 +567,119 @@ final class UsageStore {
         // The timer task will be cancelled when augmentKeepalive is deallocated
     }
 
-    func handleSessionQuotaTransition(provider: UsageProvider, snapshot: UsageSnapshot) {
+    private func startAugmentKeepalive() {
+        #if os(macOS)
+        print("[CodexBar] 🔍 Checking if Augment keepalive should start...")
+        print("[CodexBar]   - Augment enabled: \(self.isEnabled(.augment))")
+        print("[CodexBar]   - Augment available: \(self.isProviderAvailable(.augment))")
+
+        // Only start keepalive if Augment is enabled
+        guard self.isEnabled(.augment) else {
+            print("[CodexBar] ⚠️ Augment keepalive NOT started - provider is disabled")
+            print("[CodexBar]   Tip: Enable Augment in Settings to activate automatic session management")
+            return
+        }
+
+        let logger: (String) -> Void = { message in
+            print("[CodexBar] \(message)")
+        }
+
+        self.augmentKeepalive = AugmentSessionKeepalive(logger: logger)
+        self.augmentKeepalive?.start()
+        print("[CodexBar] ✅ Augment session keepalive STARTED successfully")
+        #endif
+    }
+
+    /// Force refresh Augment session (called from UI button)
+    func forceRefreshAugmentSession() async {
+        #if os(macOS)
+        print("[CodexBar] 🔄 Force refresh Augment session requested")
+        guard let keepalive = self.augmentKeepalive else {
+            print("[CodexBar] ⚠️ Augment keepalive not running - starting it now")
+            self.startAugmentKeepalive()
+            // Give it a moment to start
+            try? await Task.sleep(for: .seconds(1))
+            guard let keepalive = self.augmentKeepalive else {
+                print("[CodexBar] ✗ Failed to start Augment keepalive")
+                return
+            }
+            await keepalive.forceRefresh()
+            return
+        }
+
+        await keepalive.forceRefresh()
+
+        // Refresh usage after forcing session refresh
+        print("[CodexBar] 🔄 Refreshing Augment usage after session refresh")
+        await self.refreshProvider(.augment)
+        #endif
+    }
+
+    private func refreshProvider(_ provider: UsageProvider) async {
+        guard let spec = self.providerSpecs[provider] else { return }
+        let codexAccountID = provider == .codex ? CodexAccountStore.selectedAccountID() : nil
+
+        if !spec.isEnabled() {
+            self.refreshingProviders.remove(provider)
+            await MainActor.run {
+                self.snapshots.removeValue(forKey: provider)
+                self.errors[provider] = nil
+                self.lastSourceLabels.removeValue(forKey: provider)
+                self.lastFetchAttempts.removeValue(forKey: provider)
+                self.tokenSnapshots.removeValue(forKey: provider)
+                self.tokenErrors[provider] = nil
+                self.failureGates[provider]?.reset()
+                self.tokenFailureGates[provider]?.reset()
+                self.statuses.removeValue(forKey: provider)
+                self.lastKnownSessionRemaining.removeValue(forKey: provider)
+                self.lastTokenFetchAt.removeValue(forKey: provider)
+            }
+            return
+        }
+
+        self.refreshingProviders.insert(provider)
+        defer { self.refreshingProviders.remove(provider) }
+
+        let outcome = await spec.fetch()
+        await MainActor.run {
+            self.lastFetchAttempts[provider] = outcome.attempts
+        }
+
+        switch outcome.result {
+        case let .success(result):
+            let scoped = result.usage.scoped(to: provider)
+            await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
+                self.handleSessionQuotaTransition(provider: provider, snapshot: scoped)
+                self.snapshots[provider] = scoped
+                if provider == .codex, let accountID = CodexAccountStore.selectedAccountID() {
+                    self.codexAccountSnapshots[accountID] = scoped
+                }
+                self.lastSourceLabels[provider] = result.sourceLabel
+                self.errors[provider] = nil
+                self.failureGates[provider]?.recordSuccess()
+            }
+        case let .failure(error):
+            await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
+                let hadPriorData = self.snapshots[provider] != nil
+                let shouldSurface = self.failureGates[provider]?
+                    .shouldSurfaceError(onFailureWithPriorData: hadPriorData) ?? true
+                if shouldSurface {
+                    self.errors[provider] = error.localizedDescription
+                    self.snapshots.removeValue(forKey: provider)
+                } else {
+                    self.errors[provider] = nil
+                }
+            }
+        }
+    }
+ 
+    private func handleSessionQuotaTransition(provider: UsageProvider, snapshot: UsageSnapshot) {
         guard let primary = snapshot.primary else { return }
         let currentRemaining = primary.remainingPercent
         let previousRemaining = self.lastKnownSessionRemaining[provider]
@@ -617,9 +735,18 @@ final class UsageStore {
         self.sessionQuotaNotifier.post(transition: transition, provider: provider)
     }
 
+    private func shouldApplyCodexUpdate(accountID: String?) -> Bool {
+        let selected = CodexAccountStore.selectedAccountID()
+        if let active = self.activeCodexAccountID {
+            return active == selected && (accountID == nil || accountID == selected)
+        }
+        return accountID == nil || accountID == selected
+    }
+
     private func refreshStatus(_ provider: UsageProvider) async {
         guard self.settings.statusChecksEnabled else { return }
         guard let meta = self.providerMetadata[provider] else { return }
+        let codexAccountID = provider == .codex ? CodexAccountStore.selectedAccountID() : nil
 
         do {
             let status: ProviderStatus
@@ -630,10 +757,18 @@ final class UsageStore {
             } else {
                 return
             }
-            await MainActor.run { self.statuses[provider] = status }
+            await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
+                self.statuses[provider] = status
+            }
         } catch {
             // Keep the previous status to avoid flapping when the API hiccups.
             await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 if self.statuses[provider] == nil {
                     self.statuses[provider] = ProviderStatus(
                         indicator: .unknown,
@@ -646,9 +781,13 @@ final class UsageStore {
 
     private func refreshCreditsIfNeeded() async {
         guard self.isEnabled(.codex) else { return }
+        let codexAccountID = CodexAccountStore.selectedAccountID()
         do {
             let credits = try await self.codexFetcher.loadLatestCredits()
             await MainActor.run {
+                if !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 self.credits = credits
                 self.lastCreditsError = nil
                 self.lastCreditsSnapshot = credits
@@ -658,6 +797,9 @@ final class UsageStore {
             let message = error.localizedDescription
             if message.localizedCaseInsensitiveContains("data not available yet") {
                 await MainActor.run {
+                    if !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                        return
+                    }
                     if let cached = self.lastCreditsSnapshot {
                         self.credits = cached
                         self.lastCreditsError = nil
@@ -670,6 +812,9 @@ final class UsageStore {
             }
 
             await MainActor.run {
+                if !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 self.creditsFailureStreak += 1
                 if let cached = self.lastCreditsSnapshot {
                     self.credits = cached
@@ -1087,16 +1232,37 @@ extension UsageStore {
     }
 
     func codexAccountEmailForOpenAIDashboard() -> String? {
+        let fallback = self.codexAccountFallbackInfo().email?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let fallback, !fallback.isEmpty { return fallback }
         let direct = self.snapshots[.codex]?.accountEmail(for: .codex)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let direct, !direct.isEmpty { return direct }
-        let fallback = self.codexFetcher.loadAccountInfo().email?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let fallback, !fallback.isEmpty { return fallback }
         let cached = self.openAIDashboard?.signedInEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let cached, !cached.isEmpty { return cached }
         let imported = self.lastOpenAIDashboardCookieImportEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let imported, !imported.isEmpty { return imported }
         return nil
+    }
+
+    func handleCodexAccountSwitch(accountID: String) {
+        self.activeCodexAccountID = accountID
+        if let cached = self.codexAccountSnapshots[accountID] {
+            self.snapshots[.codex] = cached
+        } else {
+            self.snapshots.removeValue(forKey: .codex)
+        }
+        self.errors[.codex] = nil
+        self.lastSourceLabels.removeValue(forKey: .codex)
+        self.lastFetchAttempts.removeValue(forKey: .codex)
+        self.openAIWebAccountDidChange = true
+    }
+
+    func refreshCodexAfterSwitch() async {
+        guard self.isEnabled(.codex) else { return }
+        await self.refreshProvider(.codex)
+        await self.refreshStatus(.codex)
+        await self.refreshCreditsIfNeeded()
+        self.scheduleTokenRefresh(force: true)
     }
 }
 
