@@ -323,6 +323,9 @@ private final class CodexRPCClient: @unchecked Sendable {
         env["PATH"] = PathBuilder.effectivePATH(
             purposes: [.rpc, .nodeTooling],
             env: env)
+        if let codexHome = UsageFetcher.envValue("CODEX_HOME"), !codexHome.isEmpty {
+            env["CODEX_HOME"] = codexHome
+        }
 
         self.process.environment = env
         self.process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -470,11 +473,29 @@ private final class CodexRPCClient: @unchecked Sendable {
 // MARK: - Public fetcher used by the app
 
 public struct UsageFetcher: Sendable {
-    private let environment: [String: String]
+    private let environmentProvider: @Sendable () -> [String: String]
 
     public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        self.environment = environment
+        self.environmentProvider = { environment }
         LoginShellPathCache.shared.captureOnce()
+    }
+
+    public init(environmentProvider: @escaping @Sendable () -> [String: String]) {
+        self.environmentProvider = environmentProvider
+        LoginShellPathCache.shared.captureOnce()
+    }
+
+    public static func liveEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        if let codexHome = self.envValue("CODEX_HOME"), !codexHome.isEmpty {
+            env["CODEX_HOME"] = codexHome
+        }
+        return env
+    }
+
+    fileprivate static func envValue(_ key: String) -> String? {
+        guard let value = getenv(key) else { return nil }
+        return String(cString: value)
     }
 
     public func loadLatestUsage() async throws -> UsageSnapshot {
@@ -591,7 +612,8 @@ public struct UsageFetcher: Sendable {
 
     public func loadAccountInfo() -> AccountInfo {
         // Keep using auth.json for quick startup (non-blocking, no RPC spin-up required).
-        let authURL = URL(fileURLWithPath: self.environment["CODEX_HOME"] ?? "\(NSHomeDirectory())/.codex")
+        let env = self.environmentProvider()
+        let authURL = URL(fileURLWithPath: env["CODEX_HOME"] ?? "\(NSHomeDirectory())/.codex")
             .appendingPathComponent("auth.json")
         guard let data = try? Data(contentsOf: authURL),
               let auth = try? JSONDecoder().decode(AuthFile.self, from: data),
@@ -653,6 +675,20 @@ public struct UsageFetcher: Sendable {
 
 // Minimal auth.json struct preserved from previous implementation
 private struct AuthFile: Decodable {
-    struct Tokens: Decodable { let idToken: String? }
+    struct Tokens: Decodable {
+        let idToken: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case idToken
+            case id_token
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.idToken = try container.decodeIfPresent(String.self, forKey: .idToken)
+                ?? container.decodeIfPresent(String.self, forKey: .id_token)
+        }
+    }
+
     let tokens: Tokens?
 }

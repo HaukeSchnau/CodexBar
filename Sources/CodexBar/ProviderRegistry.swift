@@ -85,7 +85,7 @@ struct ProviderRegistry {
                         webTimeout: 60,
                         webDebugDumpHTML: false,
                         verbose: false,
-                        env: ProcessInfo.processInfo.environment,
+                        env: UsageFetcher.liveEnvironment(),
                         settings: snapshot,
                         fetcher: codexFetcher,
                         claudeFetcher: claudeFetcher,
