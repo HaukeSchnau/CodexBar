@@ -209,11 +209,20 @@ public struct GeminiStatusProbe: Sendable {
                 dataLoader: dataLoader)
         }
 
-        // Discover the Gemini project ID for accurate quota data
-        let projectId = try? await Self.discoverGeminiProjectId(
+        let codeAssistInfo = await Self.fetchCodeAssistInfo(
             accessToken: accessToken,
             timeout: timeout,
             dataLoader: dataLoader)
+
+        // Discover the Gemini project ID for accurate quota data
+        let projectId: String? = if let codeAssistProject = codeAssistInfo?.projectId {
+            codeAssistProject
+        } else {
+            try? await Self.discoverGeminiProjectId(
+                accessToken: accessToken,
+                timeout: timeout,
+                dataLoader: dataLoader)
+        }
 
         guard let url = URL(string: Self.quotaEndpoint) else {
             throw GeminiStatusProbeError.apiError("Invalid endpoint URL")
@@ -251,10 +260,14 @@ public struct GeminiStatusProbe: Sendable {
         let snapshot = try Self.parseAPIResponse(data, email: claims.email)
 
         // Detect plan via loadCodeAssist API (most reliable method)
-        let userTier = await Self.fetchUserTier(
-            accessToken: accessToken,
-            timeout: timeout,
-            dataLoader: dataLoader)
+        let userTier: GeminiUserTierId? = if let detectedTier = codeAssistInfo?.userTier {
+            detectedTier
+        } else {
+            await Self.fetchUserTier(
+                accessToken: accessToken,
+                timeout: timeout,
+                dataLoader: dataLoader)
+        }
 
         // Plan display strings with tier mapping:
         // - standard-tier: Paid subscription (AI Pro, AI Ultra, Code Assist
@@ -332,6 +345,17 @@ public struct GeminiStatusProbe: Sendable {
         timeout: TimeInterval,
         dataLoader: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)) async -> GeminiUserTierId?
     {
+        await self.fetchCodeAssistInfo(
+            accessToken: accessToken,
+            timeout: timeout,
+            dataLoader: dataLoader)?.userTier
+    }
+
+    private static func fetchCodeAssistInfo(
+        accessToken: String,
+        timeout: TimeInterval,
+        dataLoader: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)) async -> CodeAssistInfo?
+    {
         guard let url = URL(string: loadCodeAssistEndpoint) else {
             self.log.warning("loadCodeAssist: invalid endpoint URL")
             return nil
@@ -373,22 +397,29 @@ public struct GeminiStatusProbe: Sendable {
             return nil
         }
 
-        guard let currentTier = json["currentTier"] as? [String: Any],
-              let tierId = currentTier["id"] as? String
-        else {
-            Self.log.warning("loadCodeAssist: no currentTier.id in response", metadata: [
-                "json": "\(json)",
-            ])
-            return nil
-        }
-
-        guard let tier = GeminiUserTierId(rawValue: tierId) else {
+        let tierId = (json["currentTier"] as? [String: Any])?["id"] as? String
+        let tier = tierId.flatMap { GeminiUserTierId(rawValue: $0) }
+        if let tierId, tier == nil {
             Self.log.warning("loadCodeAssist: unknown tier ID", metadata: ["tierId": tierId])
-            return nil
+        } else if let tierId {
+            Self.log.info("loadCodeAssist: tier detected", metadata: ["tier": tierId])
         }
 
-        Self.log.info("loadCodeAssist: tier detected", metadata: ["tier": tierId])
-        return tier
+        let projectId: String? = {
+            if let project = json["cloudaicompanionProject"] as? String {
+                return project
+            }
+            if let project = json["cloudaicompanionProject"] as? [String: Any] {
+                return project["id"] as? String
+            }
+            return nil
+        }()
+
+        if let projectId {
+            Self.log.info("loadCodeAssist: project detected", metadata: ["projectId": projectId])
+        }
+
+        return CodeAssistInfo(userTier: tier, projectId: projectId)
     }
 
     private struct OAuthCredentials {
@@ -401,6 +432,11 @@ public struct GeminiStatusProbe: Sendable {
     private struct OAuthClientCredentials {
         let clientId: String
         let clientSecret: String
+    }
+
+    private struct CodeAssistInfo {
+        let userTier: GeminiUserTierId?
+        let projectId: String?
     }
 
     private static func extractOAuthCredentials() -> OAuthClientCredentials? {
@@ -434,11 +470,15 @@ public struct GeminiStatusProbe: Sendable {
 
         let oauthSubpath =
             "node_modules/@google/gemini-cli/node_modules/@google/gemini-cli-core/dist/src/code_assist/oauth2.js"
+        let nixShareSubpath =
+            "share/gemini-cli/node_modules/@google/gemini-cli-core/dist/src/code_assist/oauth2.js"
         let oauthFile = "dist/src/code_assist/oauth2.js"
         let possiblePaths = [
             // Homebrew nested structure
             "\(baseDir)/libexec/lib/\(oauthSubpath)",
             "\(baseDir)/lib/\(oauthSubpath)",
+            // Nix package layout
+            "\(baseDir)/\(nixShareSubpath)",
             // Bun/npm sibling structure: gemini-cli-core is a sibling to gemini-cli
             "\(baseDir)/../gemini-cli-core/\(oauthFile)",
             // npm nested inside gemini-cli
