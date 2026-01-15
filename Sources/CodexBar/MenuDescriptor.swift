@@ -210,19 +210,40 @@ struct MenuDescriptor {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let planText = snapshot?.loginMethod(for: provider)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackEmail = metadata.usesAccountFallback
+            ? fallback.email?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        let fallbackPlan = metadata.usesAccountFallback
+            ? fallback.plan?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        let preferFallbackEmail = provider == .codex && (fallbackEmail?.isEmpty == false)
+        let preferFallbackPlan = provider == .codex && (fallbackPlan?.isEmpty == false)
 
-        if let emailText, !emailText.isEmpty {
+        if preferFallbackEmail, let fallbackEmail, !fallbackEmail.isEmpty {
+            entries.append(.text("Account: \(fallbackEmail)", .secondary))
+        } else if let emailText, !emailText.isEmpty {
             entries.append(.text("Account: \(emailText)", .secondary))
         }
-        if let planText, !planText.isEmpty {
+
+        if preferFallbackPlan, let fallbackPlan, !fallbackPlan.isEmpty {
+            entries.append(.text("Plan: \(AccountFormatter.plan(fallbackPlan))", .secondary))
+        } else if let planText, !planText.isEmpty {
             entries.append(.text("Plan: \(AccountFormatter.plan(planText))", .secondary))
         }
 
-        if metadata.usesAccountFallback {
-            if emailText?.isEmpty ?? true, let fallbackEmail = fallback.email, !fallbackEmail.isEmpty {
+        if metadata.usesAccountFallback, !preferFallbackEmail || !preferFallbackPlan {
+            if !preferFallbackEmail,
+               emailText?.isEmpty ?? true,
+               let fallbackEmail,
+               !fallbackEmail.isEmpty
+            {
                 entries.append(.text("Account: \(fallbackEmail)", .secondary))
             }
-            if planText?.isEmpty ?? true, let fallbackPlan = fallback.plan, !fallbackPlan.isEmpty {
+            if !preferFallbackPlan,
+               planText?.isEmpty ?? true,
+               let fallbackPlan,
+               !fallbackPlan.isEmpty
+            {
                 entries.append(.text("Plan: \(AccountFormatter.plan(fallbackPlan))", .secondary))
             }
         }
@@ -267,7 +288,11 @@ struct MenuDescriptor {
                 accountLabel = "Open Terminal"
                 accountAction = .openTerminal(command: "claude")
             } else {
-                accountLabel = hasAccount ? "Switch Account..." : "Add Account..."
+                if targetProvider == .codex {
+                    accountLabel = "Add Account..."
+                } else {
+                    accountLabel = hasAccount ? "Switch Account..." : "Add Account..."
+                }
                 accountAction = loginAction
             }
             entries.append(.action(accountLabel, accountAction))
