@@ -3,7 +3,8 @@ import CodexBarCore
 @MainActor
 extension StatusItemController {
     func runCodexLoginFlow() async {
-        let result = await CodexLoginRunner.run(timeout: 120)
+        let codexHome = CodexAccountStore.account(for: CodexAccountStore.selectedAccountID())?.path.path
+        let result = await CodexLoginRunner.run(timeout: 120, codexHome: codexHome)
         guard !Task.isCancelled else { return }
         self.loginPhase = .idle
         self.presentCodexLoginResult(result)

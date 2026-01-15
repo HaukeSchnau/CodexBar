@@ -210,6 +210,8 @@ final class UsageStore {
     @ObservationIgnored var tokenFailureGates: [UsageProvider: ConsecutiveFailureGate] = [:]
     @ObservationIgnored var providerSpecs: [UsageProvider: ProviderSpec] = [:]
     @ObservationIgnored private let providerMetadata: [UsageProvider: ProviderMetadata]
+    @ObservationIgnored var codexAccountSnapshots: [String: UsageSnapshot] = [:]
+    @ObservationIgnored private var activeCodexAccountID: String?
     @ObservationIgnored private var timerTask: Task<Void, Never>?
     @ObservationIgnored private var tokenTimerTask: Task<Void, Never>?
     @ObservationIgnored private var tokenRefreshSequenceTask: Task<Void, Never>?
@@ -272,48 +274,12 @@ final class UsageStore {
         self.startAugmentKeepalive()
     }
 
-    /// Returns the login method (plan type) for the specified provider, if available.
-    private func loginMethod(for provider: UsageProvider) -> String? {
-        self.snapshots[provider]?.loginMethod(for: provider)
+    func codexAccountFallbackInfo() -> AccountInfo {
+        CodexAccountStore.selectedAccountInfo() ?? self.codexFetcher.loadAccountInfo()
     }
 
-    /// Returns true if the Claude account appears to be a subscription (Max, Pro, Ultra, Team).
-    /// Returns false for API users or when plan cannot be determined.
-    func isClaudeSubscription() -> Bool {
-        Self.isSubscriptionPlan(self.loginMethod(for: .claude))
-    }
-
-    /// Determines if a login method string indicates a Claude subscription plan.
-    /// Known subscription indicators: Max, Pro, Ultra, Team (case-insensitive).
-    nonisolated static func isSubscriptionPlan(_ loginMethod: String?) -> Bool {
-        guard let method = loginMethod?.lowercased(), !method.isEmpty else {
-            return false
-        }
-        let subscriptionIndicators = ["max", "pro", "ultra", "team"]
-        return subscriptionIndicators.contains { method.contains($0) }
-    }
-
-    func version(for provider: UsageProvider) -> String? {
-        switch provider {
-        case .codex: self.codexVersion
-        case .claude: self.claudeVersion
-        case .zai: self.zaiVersion
-        case .gemini: self.geminiVersion
-        case .antigravity: self.antigravityVersion
-        case .cursor: self.cursorVersion
-        case .opencode: nil
-        case .factory: nil
-        case .copilot: nil
-        case .minimax: nil
-        case .vertexai: nil
-        case .kiro: self.kiroVersion
-        case .augment: nil
-        case .jetbrains: nil
-        case .kimi: nil
-        case .kimik2: nil
-        case .amp: nil
-        case .synthetic: nil
-        }
+    func codexSnapshot(for accountID: String) -> UsageSnapshot? {
+        self.codexAccountSnapshots[accountID]
     }
 
     var preferredSnapshot: UsageSnapshot? {
@@ -387,10 +353,6 @@ final class UsageStore {
 
     private var codexBrowserCookieOrder: BrowserCookieImportOrder {
         self.metadata(for: .codex).browserCookieOrder ?? Browser.defaultImportOrder
-    }
-
-    func snapshot(for provider: UsageProvider) -> UsageSnapshot? {
-        self.snapshots[provider]
     }
 
     func sourceLabel(for provider: UsageProvider) -> String {
@@ -617,9 +579,18 @@ final class UsageStore {
         self.sessionQuotaNotifier.post(transition: transition, provider: provider)
     }
 
+    func shouldApplyCodexUpdate(accountID: String?) -> Bool {
+        let selected = CodexAccountStore.selectedAccountID()
+        if let active = self.activeCodexAccountID {
+            return active == selected && (accountID == nil || accountID == selected)
+        }
+        return accountID == nil || accountID == selected
+    }
+
     private func refreshStatus(_ provider: UsageProvider) async {
         guard self.settings.statusChecksEnabled else { return }
         guard let meta = self.providerMetadata[provider] else { return }
+        let codexAccountID = provider == .codex ? CodexAccountStore.selectedAccountID() : nil
 
         do {
             let status: ProviderStatus
@@ -630,10 +601,18 @@ final class UsageStore {
             } else {
                 return
             }
-            await MainActor.run { self.statuses[provider] = status }
+            await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
+                self.statuses[provider] = status
+            }
         } catch {
             // Keep the previous status to avoid flapping when the API hiccups.
             await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 if self.statuses[provider] == nil {
                     self.statuses[provider] = ProviderStatus(
                         indicator: .unknown,
@@ -646,9 +625,13 @@ final class UsageStore {
 
     private func refreshCreditsIfNeeded() async {
         guard self.isEnabled(.codex) else { return }
+        let codexAccountID = CodexAccountStore.selectedAccountID()
         do {
             let credits = try await self.codexFetcher.loadLatestCredits()
             await MainActor.run {
+                if !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 self.credits = credits
                 self.lastCreditsError = nil
                 self.lastCreditsSnapshot = credits
@@ -658,6 +641,9 @@ final class UsageStore {
             let message = error.localizedDescription
             if message.localizedCaseInsensitiveContains("data not available yet") {
                 await MainActor.run {
+                    if !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                        return
+                    }
                     if let cached = self.lastCreditsSnapshot {
                         self.credits = cached
                         self.lastCreditsError = nil
@@ -670,6 +656,9 @@ final class UsageStore {
             }
 
             await MainActor.run {
+                if !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 self.creditsFailureStreak += 1
                 if let cached = self.lastCreditsSnapshot {
                     self.credits = cached
@@ -1087,16 +1076,37 @@ extension UsageStore {
     }
 
     func codexAccountEmailForOpenAIDashboard() -> String? {
+        let fallback = self.codexAccountFallbackInfo().email?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let fallback, !fallback.isEmpty { return fallback }
         let direct = self.snapshots[.codex]?.accountEmail(for: .codex)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let direct, !direct.isEmpty { return direct }
-        let fallback = self.codexFetcher.loadAccountInfo().email?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let fallback, !fallback.isEmpty { return fallback }
         let cached = self.openAIDashboard?.signedInEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let cached, !cached.isEmpty { return cached }
         let imported = self.lastOpenAIDashboardCookieImportEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let imported, !imported.isEmpty { return imported }
         return nil
+    }
+
+    func handleCodexAccountSwitch(accountID: String) {
+        self.activeCodexAccountID = accountID
+        if let cached = self.codexAccountSnapshots[accountID] {
+            self.snapshots[.codex] = cached
+        } else {
+            self.snapshots.removeValue(forKey: .codex)
+        }
+        self.errors[.codex] = nil
+        self.lastSourceLabels.removeValue(forKey: .codex)
+        self.lastFetchAttempts.removeValue(forKey: .codex)
+        self.openAIWebAccountDidChange = true
+    }
+
+    func refreshCodexAfterSwitch() async {
+        guard self.isEnabled(.codex) else { return }
+        await self.refreshProvider(.codex)
+        await self.refreshStatus(.codex)
+        await self.refreshCreditsIfNeeded()
+        self.scheduleTokenRefresh(force: true)
     }
 }
 

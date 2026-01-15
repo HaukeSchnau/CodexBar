@@ -105,6 +105,7 @@ extension StatusItemController {
     private func populateMenu(_ menu: NSMenu, provider: UsageProvider?) {
         let selectedProvider = provider
         let enabledProviders = self.store.enabledProviders()
+        let switcherEntries = self.switcherEntries(from: enabledProviders)
         let menuWidth = self.menuCardWidth(for: enabledProviders, menu: menu)
         let currentProvider = selectedProvider ?? enabledProviders.first ?? .codex
         let tokenAccountDisplay = self.tokenAccountMenuDisplay(for: currentProvider)
@@ -114,7 +115,8 @@ extension StatusItemController {
             showAllTokenAccounts: showAllTokenAccounts)
 
         let hasTokenAccountSwitcher = menu.items.contains { $0.view is TokenAccountSwitcherView }
-        let switcherProvidersMatch = enabledProviders == self.lastSwitcherProviders
+        let switcherProvidersMatch = enabledProviders == self.lastSwitcherProviders &&
+            switcherEntries.count == enabledProviders.count
         let canSmartUpdate = self.shouldMergeIcons &&
             enabledProviders.count > 1 &&
             switcherProvidersMatch &&
@@ -139,15 +141,15 @@ extension StatusItemController {
             provider: selectedProvider,
             store: self.store,
             settings: self.settings,
-            account: self.account,
+            account: self.store.codexAccountFallbackInfo(),
             updateReady: self.updater.updateStatus.isUpdateReady)
 
         self.addProviderSwitcherIfNeeded(
             to: menu,
-            enabledProviders: enabledProviders,
+            switcherEntries: switcherEntries,
             selectedProvider: selectedProvider)
         // Track which providers the switcher was built with for smart update detection
-        if self.shouldMergeIcons, enabledProviders.count > 1 {
+        if self.shouldMergeIcons, switcherEntries.count > 1 {
             self.lastSwitcherProviders = enabledProviders
         }
         self.addTokenAccountSwitcherIfNeeded(to: menu, display: tokenAccountDisplay)
@@ -252,13 +254,13 @@ extension StatusItemController {
 
     private func addProviderSwitcherIfNeeded(
         to menu: NSMenu,
-        enabledProviders: [UsageProvider],
+        switcherEntries: [ProviderSwitcherEntry],
         selectedProvider: UsageProvider?)
     {
-        guard self.shouldMergeIcons, enabledProviders.count > 1 else { return }
+        guard self.shouldMergeIcons, switcherEntries.count > 1 else { return }
         let switcherItem = self.makeProviderSwitcherItem(
-            providers: enabledProviders,
-            selected: selectedProvider,
+            entries: switcherEntries,
+            selected: self.selectedSwitcherEntry(from: switcherEntries, selectedProvider: selectedProvider),
             menu: menu)
         menu.addItem(switcherItem)
         menu.addItem(.separator())
@@ -416,26 +418,34 @@ extension StatusItemController {
     }
 
     private func makeProviderSwitcherItem(
-        providers: [UsageProvider],
-        selected: UsageProvider?,
+        entries: [ProviderSwitcherEntry],
+        selected: ProviderSwitcherEntry?,
         menu: NSMenu) -> NSMenuItem
     {
         let view = ProviderSwitcherView(
-            providers: providers,
+            entries: entries,
             selected: selected,
-            width: self.menuCardWidth(for: providers, menu: menu),
+            width: self.menuCardWidth(for: entries.map(\.provider), menu: menu),
             showsIcons: self.settings.switcherShowsIcons,
-            iconProvider: { [weak self] provider in
-                self?.switcherIcon(for: provider) ?? NSImage()
+            iconProvider: { [weak self] entry in
+                self?.switcherIcon(for: entry) ?? NSImage()
             },
-            weeklyRemainingProvider: { [weak self] provider in
-                self?.switcherWeeklyRemaining(for: provider)
+            weeklyRemainingProvider: { [weak self] entry in
+                self?.switcherWeeklyRemaining(for: entry)
             },
-            onSelect: { [weak self, weak menu] provider in
+            onSelect: { [weak self, weak menu] entry in
                 guard let self, let menu else { return }
-                self.selectedMenuProvider = provider
-                self.lastMenuProvider = provider
-                self.populateMenu(menu, provider: provider)
+                if entry.provider == .codex, let accountID = entry.codexAccountID {
+                    let previous = CodexAccountStore.selectedAccountID()
+                    if previous != accountID {
+                        CodexAccountStore.activateAccount(id: accountID)
+                        self.store.handleCodexAccountSwitch(accountID: accountID)
+                        Task { await self.store.refreshCodexAfterSwitch() }
+                    }
+                }
+                self.selectedMenuProvider = entry.provider
+                self.lastMenuProvider = entry.provider
+                self.populateMenu(menu, provider: entry.provider)
                 self.markMenuFresh(menu)
                 self.applyIcon(phase: nil)
             })
@@ -467,6 +477,65 @@ extension StatusItemController {
         item.view = view
         item.isEnabled = false
         return item
+    }
+
+    private func switcherEntries(from providers: [UsageProvider]) -> [ProviderSwitcherEntry] {
+        var entries: [ProviderSwitcherEntry] = []
+        let codexAccounts = CodexAccountStore.accounts()
+        let codexCount = codexAccounts.count
+
+        for provider in providers {
+            if provider == .codex {
+                if codexAccounts.isEmpty {
+                    entries.append(ProviderSwitcherEntry(
+                        provider: .codex,
+                        codexAccountID: nil,
+                        title: ProviderDescriptorRegistry.descriptor(for: .codex).metadata.displayName))
+                } else {
+                    for (index, account) in codexAccounts.enumerated() {
+                        let title = Self.codexSwitcherTitle(
+                            email: account.email,
+                            index: index,
+                            totalCount: codexCount)
+                        entries.append(ProviderSwitcherEntry(
+                            provider: .codex,
+                            codexAccountID: account.id,
+                            title: title))
+                    }
+                }
+            } else {
+                entries.append(ProviderSwitcherEntry(
+                    provider: provider,
+                    codexAccountID: nil,
+                    title: ProviderDescriptorRegistry.descriptor(for: provider).metadata.displayName))
+            }
+        }
+
+        return entries
+    }
+
+    private func selectedSwitcherEntry(
+        from entries: [ProviderSwitcherEntry],
+        selectedProvider: UsageProvider?) -> ProviderSwitcherEntry?
+    {
+        let provider = selectedProvider ?? self.resolvedMenuProvider()
+        if provider == .codex {
+            let accountID = CodexAccountStore.selectedAccountID()
+            if let match = entries.first(where: { $0.provider == .codex && $0.codexAccountID == accountID }) {
+                return match
+            }
+            return entries.first(where: { $0.provider == .codex })
+        }
+        return entries.first(where: { $0.provider == provider })
+    }
+
+    private static func codexSwitcherTitle(email: String?, index: Int, totalCount: Int) -> String {
+        let trimmed = email?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty { return trimmed }
+        if totalCount > 1 {
+            return "Codex Account \(index + 1)"
+        }
+        return ProviderDescriptorRegistry.descriptor(for: .codex).metadata.displayName
     }
 
     private func resolvedMenuProvider() -> UsageProvider? {
@@ -723,13 +792,14 @@ extension StatusItemController {
         }
     }
 
-    private func switcherIcon(for provider: UsageProvider) -> NSImage {
+    private func switcherIcon(for entry: ProviderSwitcherEntry) -> NSImage {
+        let provider = entry.provider
         if let brand = ProviderBrandIcon.image(for: provider) {
             return brand
         }
 
         // Fallback to the dynamic icon renderer if resources are missing (e.g. dev bundle mismatch).
-        let snapshot = self.store.snapshot(for: provider)
+        let snapshot = self.store.snapshot(for: provider, codexAccountID: entry.codexAccountID)
         let showUsed = self.settings.usageBarsShowUsed
         let primary = showUsed ? snapshot?.primary?.usedPercent : snapshot?.primary?.remainingPercent
         let weekly = showUsed ? snapshot?.secondary?.usedPercent : snapshot?.secondary?.remainingPercent
@@ -761,11 +831,19 @@ extension StatusItemController {
         return showUsed ? window.usedPercent : window.remainingPercent
     }
 
-    private func switcherWeeklyRemaining(for provider: UsageProvider) -> Double? {
-        Self.switcherWeeklyMetricPercent(
-            for: provider,
-            snapshot: self.store.snapshot(for: provider),
-            showUsed: self.settings.usageBarsShowUsed)
+    private func switcherWeeklyRemaining(for entry: ProviderSwitcherEntry) -> Double? {
+        let provider = entry.provider
+        let snapshot = self.store.snapshot(for: provider, codexAccountID: entry.codexAccountID)
+        let window: RateWindow? = if provider == .factory {
+            snapshot?.secondary ?? snapshot?.primary
+        } else {
+            snapshot?.primary ?? snapshot?.secondary
+        }
+        guard let window else { return nil }
+        if self.settings.usageBarsShowUsed {
+            return window.usedPercent
+        }
+        return window.remainingPercent
     }
 
     private func selector(for action: MenuDescriptor.MenuAction) -> (Selector, Any?) {
@@ -1118,7 +1196,7 @@ extension StatusItemController {
             dashboardError: dashboardError,
             tokenSnapshot: tokenSnapshot,
             tokenError: tokenError,
-            account: self.account,
+            account: self.store.codexAccountFallbackInfo(),
             isRefreshing: self.store.isRefreshing,
             lastError: errorOverride ?? self.store.error(for: target),
             usageBarsShowUsed: self.settings.usageBarsShowUsed,

@@ -76,6 +76,7 @@ extension UsageStore {
 
     func refreshProvider(_ provider: UsageProvider, allowDisabled: Bool = false) async {
         guard let spec = self.providerSpecs[provider] else { return }
+        let codexAccountID = provider == .codex ? CodexAccountStore.selectedAccountID() : nil
 
         if !spec.isEnabled(), !allowDisabled {
             self.refreshingProviders.remove(provider)
@@ -118,14 +119,23 @@ extension UsageStore {
         case let .success(result):
             let scoped = result.usage.scoped(to: provider)
             await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 self.handleSessionQuotaTransition(provider: provider, snapshot: scoped)
                 self.snapshots[provider] = scoped
+                if provider == .codex, let accountID = CodexAccountStore.selectedAccountID() {
+                    self.codexAccountSnapshots[accountID] = scoped
+                }
                 self.lastSourceLabels[provider] = result.sourceLabel
                 self.errors[provider] = nil
                 self.failureGates[provider]?.recordSuccess()
             }
         case let .failure(error):
             await MainActor.run {
+                if provider == .codex, !self.shouldApplyCodexUpdate(accountID: codexAccountID) {
+                    return
+                }
                 let hadPriorData = self.snapshots[provider] != nil
                 let shouldSurface = self.failureGates[provider]?
                     .shouldSurfaceError(onFailureWithPriorData: hadPriorData) ?? true

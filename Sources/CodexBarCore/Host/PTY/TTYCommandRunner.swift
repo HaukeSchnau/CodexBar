@@ -659,6 +659,10 @@ public struct TTYCommandRunner {
             env: baseEnv,
             loginPATH: loginPATH,
             home: home)
+        if let value = getenv("CODEX_HOME") {
+            let codexHome = String(cString: value)
+            if !codexHome.isEmpty { env["CODEX_HOME"] = codexHome }
+        }
         if env["HOME"]?.isEmpty ?? true {
             env["HOME"] = home
         }

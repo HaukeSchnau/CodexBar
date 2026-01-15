@@ -1,5 +1,6 @@
 import AppKit
 import CodexBarCore
+import Foundation
 import SwiftUI
 
 @MainActor
